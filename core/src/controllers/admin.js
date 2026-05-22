@@ -18,6 +18,7 @@ const { addOrUpdateAccount, deleteAccount } = store;
 const { findAccountByRef, normalizeAccountRef, resolveAccountId } = require('../services/account-resolver');
 const { createModuleLogger } = require('../services/logger');
 const { MiniProgramLoginSession } = require('../services/qrlogin');
+const axios = require('axios');
 const { sendPushooMessage } = require('../services/push');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
 const { fetchProfileByCode } = require('../services/manual-login-profile');
@@ -144,7 +145,7 @@ function startAdminServer(dataProvider) {
     });
 
     app.use('/api', (req, res, next) => {
-        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/auth/validate' || req.path === '/admin/password-auth-status') return next();
+        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/qr/wx/start' || req.path === '/qr/wx/status' || req.path === '/qr/wx/register' || req.path === '/qr/wx/get-code' || req.path === '/auth/validate' || req.path === '/admin/password-auth-status') return next();
         return authRequired(req, res, next);
     });
 
@@ -1002,6 +1003,128 @@ function startAdminServer(dataProvider) {
             }
         } catch (e) {
             res.status(500).json({ ok: false, error: e.message });
+        }
+    });
+
+    // ============ 微信小程序扫码登录 (yuban.ltd 代理) ============
+    const YUBAN_BASE = 'http://www.yuban.ltd/farm';
+    const YUBAN_TIMEOUT = 10000;
+
+    const getYubanConfig = () => {
+        const cfg = store.getQrLoginConfig ? store.getQrLoginConfig() : { apiDomain: 'q.qq.com', yubanDeviceId: '', yubanServerMode: 'proxy' };
+        return cfg;
+    };
+
+    const getYubanDeviceId = () => {
+        const cfg = getYubanConfig();
+        if (cfg.yubanDeviceId) return cfg.yubanDeviceId;
+        const id = crypto.randomUUID();
+        store.setQrLoginConfig({ ...cfg, yubanDeviceId: id });
+        return id;
+    };
+
+    const getYubanServerMode = () => getYubanConfig().yubanServerMode || 'proxy';
+
+    const yubanApi = async (method, subpath, body) => {
+        const mode = getYubanServerMode();
+        const headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+            'Referer': 'http://www.yuban.ltd/farm/',
+            'Origin': 'http://www.yuban.ltd',
+            'X-Device-Id': getYubanDeviceId(),
+            'X-Server-Mode': mode,
+        };
+        const url = `${YUBAN_BASE}${subpath}`;
+        const opts = { method, url, data: body, headers, timeout: YUBAN_TIMEOUT };
+        const res = await axios(opts);
+        return res.data;
+    };
+
+    app.post('/api/qr/wx/start', async (_req, res) => {
+        try {
+            adminLogger.info('wx start login', { deviceId: getYubanDeviceId() });
+            const data = await yubanApi('POST', '/api/login/start');
+            if (!data.success) {
+                return res.json({ ok: false, error: data.error || '启动登录失败' });
+            }
+            res.json({ ok: true, data: {
+                sessionId: data.sessionId,
+                qrcodeDataUrl: data.qrcodeDataUrl,
+                qrcodeUrl: data.qrcodeUrl,
+            }});
+        } catch (e) {
+            adminLogger.error('wx qr start failed', e.message);
+            res.json({ ok: false, error: '微信扫码服务暂不可用，请稍后再试' });
+        }
+    });
+
+    app.get('/api/qr/wx/status', async (req, res) => {
+        const sessionId = req.query.sessionId || '';
+        if (!sessionId) {
+            return res.json({ ok: false, error: 'missing sessionId' });
+        }
+        try {
+            const data = await yubanApi('GET', `/api/login/status?sessionId=${encodeURIComponent(sessionId)}`);
+            if (!data.success) {
+                if (data.error) {
+                    return res.json({ ok: false, error: data.error });
+                }
+                return res.json({ ok: true, data: { status: 'waiting', running: data.running } });
+            }
+            const status = (data.status || '').toLowerCase();
+            const account = data.account || null;
+            res.json({ ok: true, data: {
+                status,
+                running: data.running,
+                account: account ? {
+                    openid: account.openid,
+                    nickname: account.nickname,
+                    headImgUrl: account.headImgUrl,
+                } : null,
+            }});
+        } catch (e) {
+            adminLogger.error('wx qr status failed', e.message);
+            res.json({ ok: false, error: '查询扫码状态失败' });
+        }
+    });
+
+    app.post('/api/qr/wx/register', async (req, res) => {
+        const { sessionId } = req.body || {};
+        if (!sessionId) {
+            return res.json({ ok: false, error: 'missing sessionId' });
+        }
+        adminLogger.info('wx register request', { sessionId, deviceId: getYubanDeviceId() });
+        try {
+            const data = await yubanApi('POST', '/api/device/register-after-login', { sessionId });
+            adminLogger.info('wx register result', data);
+            if (!data.success) {
+                return res.json({ ok: false, error: data.error || '注册设备失败' });
+            }
+            const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+            res.json({ ok: true, data: { accounts } });
+        } catch (e) {
+            adminLogger.error('wx register failed', { msg: e.message, resp: e.response?.data });
+            res.json({ ok: false, error: '注册设备失败，请稍后再试' });
+        }
+    });
+
+    app.post('/api/qr/wx/get-code', async (req, res) => {
+        const { openid } = req.body || {};
+        if (!openid) {
+            return res.json({ ok: false, error: 'missing openid' });
+        }
+        adminLogger.info('wx get-code request', { openid, deviceId: getYubanDeviceId() });
+        try {
+            const data = await yubanApi('POST', '/api/get-code', { openid });
+            adminLogger.info('wx get-code result', data);
+            if (!data.success) {
+                return res.json({ ok: false, error: data.error || '获取 Code 失败' });
+            }
+            res.json({ ok: true, data: { code: data.code } });
+        } catch (e) {
+            adminLogger.error('wx get-code failed', { msg: e.message, resp: e.response?.data, code: e.code });
+            res.json({ ok: false, error: '获取 Code 失败，请稍后再试' });
         }
     });
 

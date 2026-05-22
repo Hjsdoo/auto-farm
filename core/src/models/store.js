@@ -37,6 +37,8 @@ const DEFAULT_OFFLINE_REMINDER = {
 
 const DEFAULT_QR_LOGIN = {
     apiDomain: 'q.qq.com',
+    yubanDeviceId: '',
+    yubanServerMode: 'proxy',
 };
 
 const DEFAULT_RUNTIME_CLIENT = {
@@ -210,6 +212,8 @@ function normalizeQrLoginConfig(input) {
     const src = (input && typeof input === 'object') ? input : {};
     return {
         apiDomain: normalizeApiDomain(src.apiDomain, DEFAULT_QR_LOGIN.apiDomain),
+        yubanDeviceId: String(src.yubanDeviceId || ''),
+        yubanServerMode: String(src.yubanServerMode || 'proxy'),
     };
 }
 
