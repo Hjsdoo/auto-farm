@@ -20,6 +20,7 @@ function createRuntimeEngine(options = {}) {
   const onStatusSync = typeof options.onStatusSync === 'function' ? options.onStatusSync : null
   const onLog = typeof options.onLog === 'function' ? options.onLog : null
   const onAccountLog = typeof options.onAccountLog === 'function' ? options.onAccountLog : null
+  const onAccountOffline = typeof options.onAccountOffline === 'function' ? options.onAccountOffline : null
   const startAdminServer = typeof options.startAdminServer === 'function' ? options.startAdminServer : null
 
   const workerControls = { startWorker: null, restartWorker: null }
@@ -91,6 +92,10 @@ function createRuntimeEngine(options = {}) {
     onStatusSync: (accountId, status, accountName) => {
       runtimeEvents.emit('status', { accountId, status, accountName })
       if (onStatusSync) onStatusSync(accountId, status, accountName)
+    },
+    onAccountOffline: (accountId, payload) => {
+      runtimeEvents.emit('account_offline', { accountId, payload })
+      if (onAccountOffline) onAccountOffline(accountId, payload)
     },
     onWorkerLog: (entry, accountId, accountName) => {
       runtimeEvents.emit('worker_log', { entry, accountId, accountName })

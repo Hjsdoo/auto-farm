@@ -42,8 +42,17 @@ function getBorderColor(type: string) {
         :class="[getBgColor(toast.type), getBorderColor(toast.type)]"
       >
         <div :class="getIcon(toast.type)" class="mt-0.5 shrink-0 text-xl" />
-        <div class="flex-1 break-words text-sm text-gray-700 dark:text-gray-200">
-          {{ toast.message }}
+        <div class="min-w-0 flex-1">
+          <div class="break-words text-sm text-gray-700 dark:text-gray-200">
+            {{ toast.message }}
+          </div>
+          <button
+            v-if="toast.action"
+            class="mt-2 rounded bg-blue-500 px-3 py-1 text-xs text-white font-medium transition-colors hover:bg-blue-600"
+            @click="toast.action.onClick(); toastStore.remove(toast.id)"
+          >
+            {{ toast.action.label }}
+          </button>
         </div>
         <button
           class="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"

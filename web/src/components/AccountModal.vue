@@ -160,7 +160,8 @@ async function onWxLoginSuccess(_account: any) {
       const nickname = acc.nickname || ''
       const accName = form.name.trim() || nickname || '微信账号'
       await addAccount({
-        name: accName,
+        id: props.editData?.id,
+        name: props.editData ? (props.editData.name || accName) : accName,
         code: authCode,
         platform: 'wx',
         loginType: 'qr',

@@ -9,6 +9,7 @@ const {
     emitRealtimeStatus,
     emitRealtimeLog,
     emitRealtimeAccountLog,
+    emitRealtimeAccountOffline,
 } = require('./src/controllers/admin');
 const { createRuntimeEngine } = require('./src/runtime/runtime-engine');
 const { createModuleLogger } = require('./src/services/logger');
@@ -31,6 +32,9 @@ if (isWorkerProcess) {
         },
         onAccountLog: (entry) => {
             emitRealtimeAccountLog(entry);
+        },
+        onAccountOffline: (accountId, payload) => {
+            emitRealtimeAccountOffline(accountId, payload);
         },
     });
 

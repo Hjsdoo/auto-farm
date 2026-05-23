@@ -4,6 +4,11 @@ import { defineStore } from 'pinia'
 import { io } from 'socket.io-client'
 import { ref } from 'vue'
 import api from '@/api'
+import { useAccountStore } from '@/stores/account'
+import { useToastStore } from '@/stores/toast'
+
+export const reloginTarget = ref<{ id: string, name: string, platform: string } | null>(null)
+const offlineToastIds: Record<string, number> = {}
 
 // Define interfaces for better type checking
 interface DailyGift {
@@ -35,6 +40,10 @@ export const useStatusStore = defineStore('status', () => {
   const currentRealtimeAccountId = ref('')
   const tokenRef = useStorage('admin_token', '')
 
+  function getToken() {
+    return String(localStorage.getItem('admin_token') || tokenRef.value || '')
+  }
+
   let socket: Socket | null = null
 
   function normalizeStatusPayload(input: any) {
@@ -63,6 +72,62 @@ export const useStatusStore = defineStore('status', () => {
     accountLogs.value.push(next)
     if (accountLogs.value.length > 300)
       accountLogs.value = accountLogs.value.slice(-300)
+  }
+
+  function handleAccountOffline(payload: any) {
+    const body = (payload && typeof payload === 'object') ? payload : {}
+    const accountId = String(body.accountId || '')
+    const accountName = String(body.accountName || accountId || '未知账号')
+    const reason = String(body.reason || 'offline')
+
+    let message: string
+    if (reason === 'kicked') {
+      const detail = body.detail ? `: ${body.detail}` : ''
+      message = `账号 ${accountName} 被踢下线${detail}`
+    }
+    else if (reason === 'login_expired') {
+      message = `账号 ${accountName} 登录已失效，请重新登录`
+    }
+    else {
+      message = `账号 ${accountName} 已离线`
+    }
+
+    const toastStore = useToastStore()
+    const accountStore = useAccountStore()
+
+    const acc = accountStore.accounts.find(a => String(a.id) === accountId)
+    const platform = acc?.platform || 'qq'
+
+    // Dismiss previous toast for same account
+    if (offlineToastIds[accountId]) {
+      toastStore.remove(offlineToastIds[accountId])
+    }
+    offlineToastIds[accountId] = toastStore.addWithAction(message, 'warning', {
+      label: '重新登录',
+      onClick: () => {
+        reloginTarget.value = { id: accountId, name: accountName, platform }
+      },
+    })
+
+    // Desktop notification
+    if (typeof Notification !== 'undefined') {
+      const showNotification = () => {
+        const n = new Notification('QQ农场 - 账号下线', { body: message, icon: '/favicon.ico' })
+        n.onclick = () => {
+          window.focus()
+          reloginTarget.value = { id: accountId, name: accountName, platform }
+        }
+      }
+      if (Notification.permission === 'granted') {
+        showNotification()
+      }
+      else if (Notification.permission === 'default') {
+        Notification.requestPermission().then((p) => {
+          if (p === 'granted')
+            showNotification()
+        })
+      }
+    }
   }
 
   function handleRealtimeStatus(payload: any) {
@@ -107,7 +172,7 @@ export const useStatusStore = defineStore('status', () => {
       autoConnect: false,
       transports: ['websocket'],
       auth: {
-        token: tokenRef.value,
+        token: getToken(),
       },
     })
 
@@ -130,6 +195,7 @@ export const useStatusStore = defineStore('status', () => {
       console.error('[realtime] 连接失败:', err.message)
     })
 
+    socket.on('account:offline', handleAccountOffline)
     socket.on('status:update', handleRealtimeStatus)
     socket.on('log:new', handleRealtimeLog)
     socket.on('account-log:new', handleRealtimeAccountLog)
@@ -140,12 +206,11 @@ export const useStatusStore = defineStore('status', () => {
 
   function connectRealtime(accountId: string) {
     currentRealtimeAccountId.value = String(accountId || '').trim()
-    if (!tokenRef.value)
-      return
+    const token = getToken()
 
     const client = ensureRealtimeSocket()
     client.auth = {
-      token: tokenRef.value,
+      token,
       accountId: currentRealtimeAccountId.value || 'all',
     }
 
@@ -162,13 +227,13 @@ export const useStatusStore = defineStore('status', () => {
     socket.off('connect')
     socket.off('disconnect')
     socket.off('connect_error')
+    // account:offline listener kept alive — always receive offline notifications
     socket.off('status:update', handleRealtimeStatus)
     socket.off('log:new', handleRealtimeLog)
     socket.off('account-log:new', handleRealtimeAccountLog)
     socket.off('logs:snapshot', handleRealtimeLogsSnapshot)
     socket.off('account-logs:snapshot', handleRealtimeAccountLogsSnapshot)
-    socket.disconnect()
-    socket = null
+    // Keep socket connected for global events (account:offline)
     realtimeConnected.value = false
   }
 
@@ -268,7 +333,19 @@ export const useStatusStore = defineStore('status', () => {
     realtimeLogsEnabled.value = !!enabled
   }
 
+  function dismissReloginToast(accountId: string) {
+    const id = String(accountId || '')
+    if (offlineToastIds[id]) {
+      useToastStore().remove(offlineToastIds[id])
+      delete offlineToastIds[id]
+    }
+  }
+
+  // Auto-connect global socket on store init for account:offline events
+  connectRealtime('all')
+
   return {
+    dismissReloginToast,
     status,
     logs,
     accountLogs,

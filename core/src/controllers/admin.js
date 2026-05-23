@@ -54,6 +54,13 @@ function emitRealtimeLog(entry) {
     io.to('account:all').emit('log:new', payload);
 }
 
+function emitRealtimeAccountOffline(accountId, payload) {
+    if (!io) return;
+    const id = String(accountId || '').trim();
+    if (!id) return;
+    io.emit('account:offline', { accountId: id, ...payload });
+}
+
 function emitRealtimeAccountLog(entry) {
     if (!io) return;
     const payload = (entry && typeof entry === 'object') ? entry : {};
@@ -1193,6 +1200,10 @@ function startAdminServer(dataProvider) {
     });
 
     io.use((socket, next) => {
+        // Skip auth when password authentication is disabled
+        if (store.getDisablePasswordAuth && store.getDisablePasswordAuth()) {
+            return next();
+        }
         const authToken = socket.handshake.auth && socket.handshake.auth.token
             ? String(socket.handshake.auth.token)
             : '';
@@ -1223,6 +1234,7 @@ function startAdminServer(dataProvider) {
 
 module.exports = {
     startAdminServer,
+    emitRealtimeAccountOffline,
     emitRealtimeStatus,
     emitRealtimeLog,
     emitRealtimeAccountLog,

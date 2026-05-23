@@ -3,11 +3,17 @@ import { ref } from 'vue'
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 export interface Toast {
   id: number
   message: string
   type: ToastType
   duration?: number
+  action?: ToastAction
 }
 
 export const useToastStore = defineStore('toast', () => {
@@ -42,6 +48,24 @@ export const useToastStore = defineStore('toast', () => {
     }
   }
 
+  function addWithAction(message: string, type: ToastType, action: ToastAction, duration = 0) {
+    const key = `${type}:${message}:action`
+    if (toasts.value.some(t => t.message === message && t.type === type))
+      return 0
+    if (recentMessages.has(key))
+      return 0
+    recentMessages.add(key)
+    setTimeout(() => recentMessages.delete(key), 60000)
+
+    const id = nextId++
+    const toast: Toast = { id, message, type, duration, action }
+    toasts.value.push(toast)
+    if (duration > 0) {
+      setTimeout(() => remove(id), duration)
+    }
+    return id
+  }
+
   function remove(id: number) {
     const index = toasts.value.findIndex(t => t.id === id)
     if (index !== -1) {
@@ -68,6 +92,7 @@ export const useToastStore = defineStore('toast', () => {
   return {
     toasts,
     add,
+    addWithAction,
     remove,
     success,
     error,

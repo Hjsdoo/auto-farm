@@ -22,6 +22,7 @@ function createWorkerManager(options) {
         broadcastConfigToWorkers,
         onStatusSync,
         onWorkerLog,
+        onAccountOffline,
     } = options;
     const managerScheduler = createScheduler('worker_manager');
     const useThreadRuntime = runtimeMode === 'thread' && !processRef.pkg && typeof WorkerThread === 'function';
@@ -85,6 +86,8 @@ function createWorkerManager(options) {
             stopping: false,
             disconnectedSince: 0,
             autoDeleteTriggered: false,
+            offlineNotified: false,
+            wasEverConnected: false,
             wsError: null,
         };
 
@@ -227,10 +230,21 @@ function createWorkerManager(options) {
             if (connected) {
                 worker.disconnectedSince = 0;
                 worker.autoDeleteTriggered = false;
+                worker.offlineNotified = false;
+                worker.wasEverConnected = true;
                 worker.wsError = null;
             } else if (!worker.stopping) {
                 const now = Date.now();
-                if (!worker.disconnectedSince) worker.disconnectedSince = now;
+                if (!worker.disconnectedSince) {
+                    worker.disconnectedSince = now;
+                    if (worker.wasEverConnected && !worker.offlineNotified && typeof onAccountOffline === 'function') {
+                        worker.offlineNotified = true;
+                        onAccountOffline(accountId, {
+                            reason: 'offline',
+                            accountName: worker.name,
+                        });
+                    }
+                }
                 const offlineMs = now - worker.disconnectedSince;
                 const autoDeleteMs = getOfflineAutoDeleteMs();
                 if (!worker.autoDeleteTriggered && offlineMs >= autoDeleteMs) {
@@ -282,6 +296,13 @@ function createWorkerManager(options) {
             const message = msg.message || '';
             worker.wsError = { code, message, at: Date.now() };
             if (code === 400) {
+                if (worker.wasEverConnected && !worker.offlineNotified && typeof onAccountOffline === 'function') {
+                    worker.offlineNotified = true;
+                    onAccountOffline(accountId, {
+                        reason: 'login_expired',
+                        accountName: worker.name,
+                    });
+                }
                 addAccountLog(
                     'ws_400',
                     `账号 ${worker.name} 登录失效，请更新 Code`,
@@ -292,6 +313,14 @@ function createWorkerManager(options) {
         } else if (msg.type === 'account_kicked') {
             const reason = msg.reason || '未知';
             log('系统', `账号 ${worker.name} 被踢下线，已自动停止账号`, { accountId: String(accountId), accountName: worker.name });
+            if (!worker.offlineNotified && typeof onAccountOffline === 'function') {
+                worker.offlineNotified = true;
+                onAccountOffline(accountId, {
+                    reason: 'kicked',
+                    accountName: worker.name,
+                    detail: reason,
+                });
+            }
             triggerOfflineReminder({
                 accountId,
                 accountName: worker.name,
