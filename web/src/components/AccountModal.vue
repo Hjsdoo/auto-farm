@@ -315,7 +315,7 @@ watch(() => props.show, (newVal) => {
 
         <!-- wx -->
         <div v-if="activeTab === 'wx'" class="flex flex-col items-center justify-center py-4 space-y-4">
-          <p class="text-sm text-gray-500 dark:text-gray-400">微信扫码仅授权登录应用宝电脑版，非登录农场</p>
+          <p class="text-sm text-gray-500 dark:text-gray-400">微信扫码仅用于授权登录应用宝电脑版，自动获取小程序 Code</p>
           <div v-if="wxQrImage" class="border rounded bg-white p-2" style="animation:qrPulse 2s ease-in-out infinite">
             <img :src="wxQrImage" class="h-48 w-48 sm:h-56 sm:w-56">
           </div>
