@@ -220,6 +220,7 @@ qq-farm-bot-ui/
 
 ## 特别感谢
 
+- [Penty-d/qq-farm-bot-ui](https://github.com/Penty-d/qq-farm-bot-ui)
 - 核心功能：[linguo2625469/qq-farm-bot](https://github.com/linguo2625469/qq-farm-bot)
 - 部分功能：[QianChenJun/qq-farm-bot](https://github.com/QianChenJun/qq-farm-bot)
 
