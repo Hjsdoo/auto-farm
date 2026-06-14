@@ -21,6 +21,7 @@ const { MiniProgramLoginSession } = require('../services/qrlogin');
 const axios = require('axios');
 const { sendPushooMessage } = require('../services/push');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
+const { createLocalProxy } = require('../services/local-proxy');
 const { fetchProfileByCode } = require('../services/manual-login-profile');
 const { 
     hashPassword: secureHash, 
@@ -1013,127 +1014,269 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    // ============ 微信小程序扫码登录 (yuban.ltd 代理) ============
-    const YUBAN_BASE = 'http://www.yuban.ltd/farm';
-    const YUBAN_TIMEOUT = 10000;
-
-    const getYubanConfig = () => {
-        const cfg = store.getQrLoginConfig ? store.getQrLoginConfig() : { apiDomain: 'q.qq.com', yubanDeviceId: '', yubanServerMode: 'proxy' };
-        return cfg;
-    };
-
-    const getYubanDeviceId = () => {
-        const cfg = getYubanConfig();
-        if (cfg.yubanDeviceId) return cfg.yubanDeviceId;
-        const id = crypto.randomUUID();
-        store.setQrLoginConfig({ ...cfg, yubanDeviceId: id });
-        return id;
-    };
-
-    const getYubanServerMode = () => getYubanConfig().yubanServerMode || 'proxy';
-
-    const yubanApi = async (method, subpath, body) => {
-        const mode = getYubanServerMode();
-        const headers = {
-            'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-            'Referer': 'http://www.yuban.ltd/farm/',
-            'Origin': 'http://www.yuban.ltd',
-            'X-Device-Id': getYubanDeviceId(),
-            'X-Server-Mode': mode,
-        };
-        const url = `${YUBAN_BASE}${subpath}`;
-        const opts = { method, url, data: body, headers, timeout: YUBAN_TIMEOUT };
-        const res = await axios(opts);
-        return res.data;
-    };
+    // ============ 微信扫码登录 (直连 q.qq.com，无需 yuban.ltd) ============
 
     app.post('/api/qr/wx/start', async (_req, res) => {
         try {
-            adminLogger.info('wx start login', { deviceId: getYubanDeviceId() });
-            const data = await yubanApi('POST', '/api/login/start');
-            if (!data.success) {
-                return res.json({ ok: false, error: data.error || '启动登录失败' });
-            }
+            adminLogger.info('wx start login (direct)');
+            const qrLogin = store.getQrLoginConfig ? store.getQrLoginConfig() : { apiDomain: 'q.qq.com' };
+            const result = await MiniProgramLoginSession.requestLoginCode({ apiDomain: qrLogin.apiDomain });
             res.json({ ok: true, data: {
-                sessionId: data.sessionId,
-                qrcodeDataUrl: data.qrcodeDataUrl,
-                qrcodeUrl: data.qrcodeUrl,
+                sessionId: result.code,
+                qrcodeDataUrl: result.image,
+                qrcodeUrl: result.url,
             }});
         } catch (e) {
-            adminLogger.error('wx qr start failed', e.message);
-            res.json({ ok: false, error: '微信扫码服务暂不可用，请稍后再试' });
+            adminLogger.error('wx qr start failed', { message: e.message });
+            res.json({ ok: false, error: '微信扫码服务暂不可用: ' + e.message });
         }
     });
 
     app.get('/api/qr/wx/status', async (req, res) => {
-        const sessionId = req.query.sessionId || '';
-        if (!sessionId) {
+        const code = req.query.sessionId || '';
+        if (!code) {
             return res.json({ ok: false, error: 'missing sessionId' });
         }
         try {
-            const data = await yubanApi('GET', `/api/login/status?sessionId=${encodeURIComponent(sessionId)}`);
-            if (!data.success) {
-                if (data.error) {
-                    return res.json({ ok: false, error: data.error });
-                }
-                return res.json({ ok: true, data: { status: 'waiting', running: data.running } });
+            const qrLogin = store.getQrLoginConfig ? store.getQrLoginConfig() : { apiDomain: 'q.qq.com' };
+            const result = await MiniProgramLoginSession.queryStatus(code, { apiDomain: qrLogin.apiDomain });
+
+            if (result.status === 'OK') {
+                res.json({ ok: true, data: {
+                    status: 'success',
+                    account: {
+                        nickname: result.nickname,
+                        ticket: result.ticket,
+                        uin: result.uin,
+                        headImgUrl: result.uin ? `https://q1.qlogo.cn/g?b=qq&nk=${result.uin}&s=640` : '',
+                    },
+                }});
+            } else if (result.status === 'Used') {
+                res.json({ ok: true, data: { status: 'expired' }});
+            } else {
+                res.json({ ok: true, data: { status: 'waiting' }});
             }
-            const status = (data.status || '').toLowerCase();
-            const account = data.account || null;
-            res.json({ ok: true, data: {
-                status,
-                running: data.running,
-                account: account ? {
-                    openid: account.openid,
-                    nickname: account.nickname,
-                    headImgUrl: account.headImgUrl,
-                } : null,
-            }});
         } catch (e) {
             adminLogger.error('wx qr status failed', e.message);
             res.json({ ok: false, error: '查询扫码状态失败' });
         }
     });
 
-    app.post('/api/qr/wx/register', async (req, res) => {
-        const { sessionId } = req.body || {};
-        if (!sessionId) {
-            return res.json({ ok: false, error: 'missing sessionId' });
-        }
-        adminLogger.info('wx register request', { sessionId, deviceId: getYubanDeviceId() });
-        try {
-            const data = await yubanApi('POST', '/api/device/register-after-login', { sessionId });
-            adminLogger.info('wx register result', data);
-            if (!data.success) {
-                return res.json({ ok: false, error: data.error || '注册设备失败' });
-            }
-            const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-            res.json({ ok: true, data: { accounts } });
-        } catch (e) {
-            adminLogger.error('wx register failed', { msg: e.message, resp: e.response?.data });
-            res.json({ ok: false, error: '注册设备失败，请稍后再试' });
-        }
+    app.post('/api/qr/wx/register', async (_req, res) => {
+        // 直连模式不需要 register 步骤
+        res.json({ ok: true, data: { accounts: [] } });
     });
 
     app.post('/api/qr/wx/get-code', async (req, res) => {
-        const { openid } = req.body || {};
-        if (!openid) {
-            return res.json({ ok: false, error: 'missing openid' });
+        let { openid, ticket } = req.body || {};
+        if (!ticket && !openid) {
+            return res.json({ ok: false, error: 'missing ticket' });
         }
-        adminLogger.info('wx get-code request', { openid, deviceId: getYubanDeviceId() });
+        adminLogger.info('wx get-code', { ticket: ticket ? ticket.slice(0, 20) + '...' : '' });
         try {
-            const data = await yubanApi('POST', '/api/get-code', { openid });
-            adminLogger.info('wx get-code result', data);
-            if (!data.success) {
-                return res.json({ ok: false, error: data.error || '获取 Code 失败' });
+            const qrLogin = store.getQrLoginConfig ? store.getQrLoginConfig() : { apiDomain: 'q.qq.com' };
+            const appid = '1112386029'; // Farm appid
+            const authCode = await MiniProgramLoginSession.getAuthCode(ticket || openid, appid, { apiDomain: qrLogin.apiDomain });
+            if (authCode) {
+                res.json({ ok: true, data: { code: authCode } });
+            } else {
+                res.json({ ok: false, error: '获取 Code 失败' });
             }
-            res.json({ ok: true, data: { code: data.code } });
         } catch (e) {
-            adminLogger.error('wx get-code failed', { msg: e.message, resp: e.response?.data, code: e.code });
-            res.json({ ok: false, error: '获取 Code 失败，请稍后再试' });
+            adminLogger.error('wx get-code failed', { msg: e.message });
+            res.json({ ok: false, error: '获取 Code 失败: ' + e.message });
         }
     });
+
+    // ---- 本地代理（自动抓取 Code）----
+    const localProxy = createLocalProxy({
+        port: 8899,
+        onCodeFound: (info) => {
+            if (io) io.emit('proxy:code-found', info)
+        },
+        onRequestCaptured: (info) => {
+            if (io) io.emit('proxy:capture', info)
+        },
+        onWsCodeCaptured: (codes) => {
+            // 截取到 QQ Farm WebSocket code，自动更新 wx 平台账号
+            const codeEntry = codes.find(c => c.pattern === 'code_param')
+            if (!codeEntry || !codeEntry.value) {
+                adminLogger.warn('onWsCodeCaptured: no code_param found')
+                return
+            }
+            const capturedCode = codeEntry.value
+            adminLogger.info('onWsCodeCaptured: got code', { code: capturedCode.slice(0, 20) + '...' })
+
+            // 查找 wx 平台账号（无 openId/gid 的 wx 账号）
+            const accounts = store.getAccounts ? store.getAccounts() : []
+            const allAccounts = (accounts && accounts.accounts) || []
+            const wxAccount = allAccounts.find(a =>
+                a.platform === 'wx' &&
+                (!a.gid || a.gid === '') &&
+                (!a.openId || a.openId === '')
+            )
+            // 如果找不到 wx 平台账号，尝试找所有 platform=wx 的账号
+            const target = wxAccount || allAccounts.find(a => a.platform === 'wx')
+
+            if (!target) {
+                adminLogger.warn('onWsCodeCaptured: no wx account found to update')
+                if (io) io.emit('proxy:code-found', { codes, note: '未找到微信账号，请先在面板添加微信账号' })
+                return
+            }
+
+            // 更新 code
+            const oldCode = target.code || ''
+            const oldCodePreview = oldCode.slice(0, 16)
+            adminLogger.info('onWsCodeCaptured: updating account', {
+                id: target.id,
+                name: target.name || '',
+                oldCode: oldCodePreview + '...',
+            })
+
+            store.addOrUpdateAccount({ id: target.id, code: capturedCode })
+
+            // 通知前端
+            if (io) io.emit('proxy:code-found', {
+                codes,
+                accountId: target.id,
+                accountName: target.name || '',
+                message: `已截取微信登录 Code 并更新到账号「${target.name || target.id}」`,
+            })
+
+            // 重启账号 Worker（如果正在运行）
+            if (provider && typeof provider.restartAccount === 'function') {
+                adminLogger.info('onWsCodeCaptured: restarting account', { id: target.id })
+                provider.restartAccount(target.id)
+            }
+        },
+    })
+
+    app.post('/api/proxy/start', async (_req, res) => {
+        try {
+            if (localProxy.getStatus().running)
+                return res.json({ ok: true, data: localProxy.getStatus() })
+            const status = await localProxy.start()
+            adminLogger.info('proxy started', { port: status.port })
+            res.json({ ok: true, data: localProxy.getStatus() })
+        } catch (e) {
+            adminLogger.error('proxy start failed', { message: e.message })
+            res.json({ ok: false, error: e.message })
+        }
+    })
+
+    app.post('/api/proxy/stop', async (_req, res) => {
+        try {
+            await localProxy.stop()
+            adminLogger.info('proxy stopped')
+            res.json({ ok: true, data: localProxy.getStatus() })
+        } catch (e) {
+            res.json({ ok: false, error: e.message })
+        }
+    })
+
+    app.get('/api/proxy/status', (_req, res) => {
+        res.json({ ok: true, data: localProxy.getStatus() })
+    })
+
+    app.get('/api/proxy/ca-cert', (_req, res) => {
+        const cert = localProxy.getCaCertPem()
+        if (!cert)
+            return res.status(404).json({ ok: false, error: 'CA 证书尚未生成，请先启动代理' })
+        res.setHeader('Content-Type', 'application/x-pem-file')
+        res.setHeader('Content-Disposition', 'attachment; filename="qq-farm-ca.pem"')
+        res.send(cert)
+    })
+
+    app.get('/api/proxy/captures', (req, res) => {
+        const limit = Math.min(200, Math.max(1, Number.parseInt(req.query.limit) || 50))
+        res.json({ ok: true, data: localProxy.getCaptures(limit) })
+    })
+
+    app.post('/api/proxy/captures/clear', (_req, res) => {
+        localProxy.clearCaptures()
+        res.json({ ok: true })
+    })
+
+    // 将 capture 中捕获的 auth_session_id 转换为 QQ 农场登录 code
+    app.post('/api/proxy/convert', async (req, res) => {
+        const { exportkey, authSessionId: inputAuthId } = req.body || {}
+        if (!inputAuthId && !exportkey) return res.json({ ok: false, error: '缺少 authSessionId 或 exportkey' })
+
+        try {
+            // 优先使用前端传的 authSessionId，没有则尝试用 exportkey 换
+            let authSessionId = inputAuthId || ''
+            if (!authSessionId && exportkey) {
+                adminLogger.info('proxy convert: re-calling getsessionfromexportkey')
+                try {
+                    const sessRes = await axios.get(`https://game.weixin.qq.com/cgi-bin/gamecenterauthwap/getsessionfromexportkey?exportkey=${encodeURIComponent(exportkey)}`, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            'Referer': 'https://game.weixin.qq.com/',
+                        },
+                        timeout: 10000,
+                    })
+                    authSessionId = sessRes.data?.data?.auth_session_id
+                } catch (e) {
+                    adminLogger.warn('proxy convert: re-call failed', { msg: e.message })
+                }
+            }
+
+            if (!authSessionId) {
+                return res.json({ ok: false, error: '未能获取 auth_session_id，请在微信中打开 QQ 农场小程序' })
+            }
+            adminLogger.info('proxy convert: got authSessionId', { sid: authSessionId.slice(0, 20) + '...' })
+
+            // 用 auth_session_id 作为 ticket 获取授权 code
+            const qrLogin = store.getQrLoginConfig ? store.getQrLoginConfig() : { apiDomain: 'q.qq.com' }
+            const domain = MiniProgramLoginSession.normalizeApiDomain(qrLogin.apiDomain)
+            const appid = '1112386029'
+
+            const codeRes = await axios.post(`https://${domain}/ide/login`, { appid, ticket: authSessionId }, {
+                headers: MiniProgramLoginSession.getHeaders(domain),
+                timeout: 15000,
+            })
+            const authCode = codeRes.data?.code
+            if (authCode) {
+                adminLogger.info('proxy convert: success', { code: authCode.slice(0, 20) + '...' })
+                return res.json({ ok: true, data: { code: authCode, authSessionId } })
+            }
+
+            adminLogger.warn('proxy convert: ide/login returned no code', { resp: JSON.stringify(codeRes.data).slice(0, 200) })
+            res.json({ ok: false, error: '获取 Code 失败：q.qq.com 接口返回为空' })
+        } catch (e) {
+            adminLogger.error('proxy convert failed', { message: e.message })
+            res.json({ ok: false, error: '转换失败: ' + e.message })
+        }
+    })
+
+    // PAC file for proxy auto-config (only proxy QQ/WeChat domains)
+    app.get('/api/proxy/proxy.pac', (_req, res) => {
+        const proxyPort = localProxy.getStatus().port || 8899
+        const pac = `
+function FindProxyForURL(url, host) {
+    host = host.toLowerCase();
+    // Direct for localhost
+    if (host == 'localhost' || host == '127.0.0.1' || host == '::1')
+        return 'DIRECT';
+    // Only proxy QQ/WeChat related domains
+    if (dnsDomainIs(host, 'qq.com') ||
+        dnsDomainIs(host, 'weixin.qq.com') ||
+        dnsDomainIs(host, 'qzone.qq.com') ||
+        shExpMatch(host, '*.ptlogin2.qq.com') ||
+        shExpMatch(host, '*.q.qq.com') ||
+        shExpMatch(host, '*.api.q.qq.com') ||
+        shExpMatch(host, '*.open.weixin.qq.com') ||
+        shExpMatch(host, '*.api.weixin.qq.com') ||
+        shExpMatch(host, '*.servicewechat.com') ||
+        shExpMatch(host, '*.qq.com'))
+        return 'PROXY 127.0.0.1:${proxyPort}; DIRECT';
+    // Everything else direct
+    return 'DIRECT';
+}
+`.trimStart()
+        res.setHeader('Content-Type', 'application/x-ns-proxy-autoconfig')
+        res.send(pac)
+    })
 
     app.get('*', (req, res) => {
         if (req.path.startsWith('/api') || req.path.startsWith('/game-config')) {
