@@ -1119,8 +1119,27 @@ function startAdminServer(dataProvider) {
             const target = wxAccount || allAccounts.find(a => a.platform === 'wx')
 
             if (!target) {
-                adminLogger.warn('onWsCodeCaptured: no wx account found to update')
-                if (io) io.emit('proxy:code-found', { codes, note: '未找到微信账号，请先在面板添加微信账号' })
+                adminLogger.warn('onWsCodeCaptured: no wx account found, creating one')
+                // 自动创建 wx 平台账号
+                const newAccount = store.addOrUpdateAccount({
+                    name: '微信账号',
+                    code: capturedCode,
+                    platform: 'wx',
+                    loginType: 'auto',
+                })
+                const newId = newAccount?.accounts?.[newAccount.accounts.length - 1]?.id
+                adminLogger.info('onWsCodeCaptured: created account', { id: newId })
+
+                if (io) io.emit('proxy:code-found', {
+                    codes,
+                    accountId: newId,
+                    message: '已自动创建微信账号并更新 Code',
+                })
+
+                // 启动新账号
+                if (newId && provider && typeof provider.startAccount === 'function') {
+                    provider.startAccount(newId)
+                }
                 return
             }
 
