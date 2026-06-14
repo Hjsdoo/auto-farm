@@ -132,7 +132,9 @@ function createLocalProxy(options = {}) {
           if (isFarmWs && hasCode && typeof onWsCodeCaptured === 'function') {
             // 截取 code，不放行，避免被服务器消耗
             console.error('[proxy] WS intercepted! blocking farm connection, code saved for bot')
-            onWsCodeCaptured(capture.codes)
+            try { onWsCodeCaptured(capture.codes) } catch (e) {
+              console.error('[proxy] onWsCodeCaptured error:', e?.message || e)
+            }
             blockConnection = true
           } else {
             console.error('[proxy] WS captured:', wsUrl.slice(0, 200))
